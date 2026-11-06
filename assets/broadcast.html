@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Siren overlay</title>
+<!--
+  The alerts on the live broadcast: an OBS Browser source, 1920x1080, transparent, top of the stack.
+  Fed by SirenDesk (/broadcast/events) the moment its engine changes. Nothing shows when it is quiet.
+  Top bar over the banner area above the camera (0..1280 x 0..180); map card over the camera's side.
+  ?lang=he|en|both  Hebrew (default), English, or both in turn (?every=8 seconds each) for viewers abroad
+  ?side=right   the card on the camera's right side
+  ?sound=1      a short tone on a new siren wave (off by default: the stream carries the camera's sound)
+  ?demo=siren|big|pre|hold|end|aircraft   a preview with made-up places, marked as a preview; never for OBS
+  ?backdrop=1   (test runs only) a still of the stream behind it, to judge the look
+  ?api=URL      where SirenDesk answers; a local file defaults to http://127.0.0.1:8150. OBS loads this page as a
+                local file, so a stopped SirenDesk leaves the page empty and waiting, never an error page on air.
+-->
+<style>
+  * { box-sizing: border-box; }
+  :root { --dir: 270deg; }
+  html[dir="ltr"] { --dir: 90deg; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; color: #fff;
+    font-family: Rubik, 'Segoe UI', Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  body.backdrop { background: #000 url(/broadcast/backdrop.png) 0 0 / 1920px 1080px no-repeat; }
+
+  /* ---- the top bar: over the banner above the camera ---- */
+  #bar { position: absolute; left: 0; top: 0; width: 1280px; height: 180px; padding: 14px 30px 0;
+    transform: translateY(-200px); transition: transform .55s cubic-bezier(.18,.9,.22,1); overflow: hidden;
+    box-shadow: 0 8px 34px rgba(0,0,0,.55); }
+  body.on #bar { transform: none; }
+  #bar::after { content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,0) 40%); }
+  #bar.siren { background: linear-gradient(var(--dir), #ec1820 0%, #ad0e15 52%, #530609 100%); }
+  #bar.hold  { background: linear-gradient(var(--dir), #8a1016 0%, #5c0a0f 55%, #2a0406 100%); }
+  #bar.pre   { background: linear-gradient(var(--dir), #f2a10a 0%, #b56f00 55%, #4d2f00 100%); }
+  #bar.end   { background: linear-gradient(var(--dir), #19b866 0%, #0f7d45 55%, #053a1f 100%); }
+  .lang { transition: opacity .22s ease; }
+  body.swap .lang { opacity: 0; }
+  .row1 { display: flex; align-items: center; gap: 20px; height: 74px; }
+  .pill { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 18px 0 16px; border-radius: 22px;
+    background: rgba(0,0,0,.30); border: 1.5px solid rgba(255,255,255,.55); font-size: 22px; font-weight: 800; white-space: nowrap; }
+  html[dir="ltr"] .pill { padding: 0 16px 0 18px; letter-spacing: .5px; }
+  .pill .dot { width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 0 rgba(255,255,255,.7); }
+  body.urgent .pill .dot { animation: ping 1.1s infinite; }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.75); } 80%, 100% { box-shadow: 0 0 0 16px rgba(255,255,255,0); } }
+  #title { font-size: 56px; font-weight: 900; line-height: 1; white-space: nowrap; letter-spacing: -.5px;
+    text-shadow: 0 2px 10px rgba(0,0,0,.35); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+  html[dir="ltr"] #title { font-size: 52px; letter-spacing: 0; }
+  #clock { margin-inline-start: auto; text-align: center; min-width: 150px; }
+  #elapsed { font-size: 46px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; font-family: Bahnschrift, Rubik, sans-serif; }
+  #clockcap { font-size: 16px; font-weight: 600; opacity: .85; margin-top: 4px; white-space: nowrap; }
+  #sub { height: 36px; font-size: 25px; font-weight: 600; opacity: .97; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    text-shadow: 0 1px 6px rgba(0,0,0,.3); }
+  html[dir="ltr"] #sub { font-size: 24px; }
+  .chips { position: relative; height: 46px; margin-top: 4px; overflow: hidden;
+    -webkit-mask-image: linear-gradient(var(--dir), #000 92%, transparent); }
+  .track { position: absolute; inset-inline-start: 0; top: 0; display: flex; gap: 10px; white-space: nowrap; }
+  .track.roll { animation: roll var(--dur, 30s) linear infinite; }
+  @keyframes roll { from { transform: translateX(0); } to { transform: translateX(var(--shift, 50%)); } }
+  .chip { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 19px;
+    background: rgba(0,0,0,.30); border: 1px solid rgba(255,255,255,.28); font-size: 21px; font-weight: 600; }
+  .chip b { font-weight: 800; }
+  .chip i { font-style: normal; font-weight: 800; background: rgba(255,255,255,.92); color: #6b0a0f; border-radius: 11px;
+    padding: 0 8px; font-size: 17px; line-height: 22px; font-family: Bahnschrift, Rubik, sans-serif; }
+  #bar.pre .chip i { color: #6b4300; } #bar.end .chip i { color: #0a5a31; } #bar.hold .chip i { color: #5c0a0f; }
+
+  /* ---- the map card: over the camera's side ---- */
+  #card { position: absolute; left: 24px; top: 198px; width: 420px; height: 684px; border-radius: 18px;
+    background: rgba(9,13,19,.90); box-shadow: 0 14px 44px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.08);
+    opacity: 0; transform: translateX(-36px) scale(.985); transition: opacity .45s ease, transform .5s cubic-bezier(.18,.9,.22,1);
+    overflow: hidden; }
+  body.right #card { left: auto; right: 664px; transform: translateX(36px) scale(.985); }
+  body.map #card { opacity: 1; transform: none; }
+  #card .head { height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
+    font-size: 18px; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,.08); }
+  #card .head span:last-child { font-family: Bahnschrift, Rubik, sans-serif; font-weight: 700; opacity: .9; }
+  #card .accent { height: 3px; background: var(--accent, #ff2e2e); }
+  canvas { display: block; }
+  #list { height: 178px; padding: 10px 18px 0; font-size: 17px; line-height: 1.4; overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, #000 78%, transparent); }
+  .grp { margin-bottom: 7px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: rgba(255,255,255,.88); }
+  .grp b { color: #fff; font-weight: 800; }
+  .foot { position: absolute; bottom: 0; left: 0; right: 0; height: 26px; padding: 0 18px; display: flex; align-items: center;
+    font-size: 13px; color: rgba(255,255,255,.55); background: rgba(0,0,0,.25); }
+
+  #mark { position: absolute; top: 196px; left: 50%; transform: translateX(-50%); display: none; padding: 6px 18px; border-radius: 16px;
+    background: #ffd60a; color: #111; font-size: 20px; font-weight: 800; white-space: nowrap; }
+  body.marked #mark { display: block; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="row1 lang">
+    <div class="pill"><span class="dot"></span><span id="pill"></span></div>
+    <div id="title"></div>
+    <div id="clock"><div id="elapsed">00:00</div><div id="clockcap"></div></div>
+  </div>
+  <div id="sub" class="lang"></div>
+  <div class="chips lang"><div class="track" id="chips"></div></div>
+</div>
+<div id="card">
+  <div class="head lang"><span id="ctitle"></span><span id="count"></span></div>
+  <div class="accent"></div>
+  <canvas id="map" width="420" height="428"></canvas>
+  <div id="list" class="lang"></div>
+  <div class="foot lang" id="foot"></div>
+</div>
+<div id="mark"></div>
+<script>
+(() => {
+  const Q = new URLSearchParams(location.search);
+  const DEMO = Q.get('demo');
+  const API = Q.get('api') || (location.protocol === 'file:' ? 'http://127.0.0.1:8150' : '');
+  const SOUND = Q.get('sound') === '1';
+  const LANGS = ({ en: ['en'], both: ['he', 'en'] })[(Q.get('lang') || 'he').toLowerCase()] || ['he'];
+  const EVERY = Math.max(4, Number(Q.get('every')) || 8) * 1000;
+  if (Q.has('backdrop')) document.body.classList.add('backdrop');
+  if (Q.get('side') === 'right') document.body.classList.add('right');
+  const $ = (id) => document.getElementById(id);
+
+  // ------------------------------------------------------------ words, in each language
+  const T = {
+    he: {
+      pill: { siren: 'צבע אדום', hold: 'הנחיה', pre: 'פיקוד העורף', end: 'עדכון' },
+      title: { hold: 'המשיכו לשהות במרחב המוגן', pre: 'התרעה מקדימה', end: 'האירוע הסתיים' },
+      places: (n) => `${n} יישובים`, areas: (n) => `${n} אזורים`,
+      cap: { siren: 'מאז האזעקה', hold: 'מאז האזעקה', pre: 'מאז ההתרעה', end: 'שעת הסיום' },
+      since: (t) => `מאז ${t}`, until: 'עד הודעת סיום',
+      preSub: 'בדקות הקרובות צפויות להתקבל התרעות באזורים המסומנים',
+      endSub: 'ניתן לצאת מהמרחב המוגן באזורים המסומנים',
+      card: { siren: 'מפת האזעקות', hold: 'מפת האזעקות', pre: 'אזורי ההתרעה המקדימה', end: 'כאן האירוע הסתיים' },
+      foot: 'התרעות פיקוד העורף', other: 'אחר',
+      preview: 'תצוגה מקדימה — לא שידור', test: 'בדיקה — לא אזעקה אמיתית',
+      threat: { Missiles: 'ירי רקטות וטילים', Aircraft: 'חדירת כלי טיס עוין', Infiltration: 'חדירת מחבלים', Earthquake: 'רעידת אדמה',
+        Tsunami: 'חשש לצונאמי', Hazmat: 'אירוע חומרים מסוכנים', Radiological: 'אירוע רדיולוגי', NonConventional: 'טיל לא קונבנציונלי',
+        Blast: 'סכנת פיצוץ והדף', General: 'התרעה' },
+      action: { Aircraft: 'היכנסו מייד למרחב המוגן', Infiltration: 'היכנסו מייד למבנה ונעלו', Earthquake: 'צאו לשטח פתוח',
+        Tsunami: 'התרחקו מחוף הים', Hazmat: 'הסתגרו מייד במבנה', Radiological: 'הסתגרו מייד במבנה', other: 'היכנסו למרחב המוגן' },
+    },
+    en: {
+      pill: { siren: 'RED ALERT', hold: 'INSTRUCTION', pre: 'HOME FRONT COMMAND', end: 'UPDATE' },
+      title: { hold: 'Stay in the protected space', pre: 'Early warning', end: 'The event has ended' },
+      places: (n) => (n === 1 ? '1 place' : `${n} places`), areas: (n) => (n === 1 ? '1 area' : `${n} areas`),
+      cap: { siren: 'since the alert', hold: 'since the alert', pre: 'since the warning', end: 'ended at' },
+      since: (t) => `since ${t}`, until: 'until the all-clear',
+      preSub: 'Launches detected: alerts are expected in the coming minutes in the marked areas',
+      endSub: 'People in the marked areas may leave the protected space',
+      card: { siren: 'Alert map', hold: 'Alert map', pre: 'Early warning areas', end: 'The event ended here' },
+      foot: 'Israel Home Front Command alerts', other: 'Other',
+      preview: 'Preview, not on air', test: 'Test, not a real alert',
+      threat: { Missiles: 'Rocket and missile fire', Aircraft: 'Hostile aircraft intrusion', Infiltration: 'Terrorist infiltration',
+        Earthquake: 'Earthquake', Tsunami: 'Tsunami warning', Hazmat: 'Hazardous materials incident', Radiological: 'Radiological event',
+        NonConventional: 'Non-conventional missile', Blast: 'Blast danger', General: 'Alert' },
+      action: { Aircraft: 'Enter a protected space now', Infiltration: 'Get indoors and lock the door', Earthquake: 'Go out to an open area',
+        Tsunami: 'Move away from the shore', Hazmat: 'Shelter indoors now', Radiological: 'Shelter indoors now', other: 'Enter a protected space' },
+    },
+  };
+  let lang = LANGS[0];
+  const L = () => T[lang];
+  function setLang(l) {
+    lang = l;
+    document.documentElement.lang = l;
+    document.documentElement.dir = l === 'he' ? 'rtl' : 'ltr';
+  }
+  setLang(lang);
+
+  const THREAT_COLOR = { Missiles: '#ff2e2e', General: '#ff2e2e', Blast: '#ff2e2e', Aircraft: '#ff7a1a', Infiltration: '#ffc800',
+    Earthquake: '#c98b2b', Tsunami: '#2e8bff', Hazmat: '#a855f7', Radiological: '#ee35a8', NonConventional: '#ee35a8' };
+  const MODE_COLOR = { pre: '#ffb020', end: '#2ed47a' };
+
+  // ------------------------------------------------------------ the map's data, once
+  let G = null, PL = [], ALL, LAND, HOME, COAST, BORDERS, LAKES;
+  const poly = (f, close) => {
+    const p = new Path2D();
+    if (!f || f.length < 4) return p;
+    p.moveTo(f[0], f[1]);
+    for (let i = 2; i < f.length; i += 2) p.lineTo(f[i], f[i + 1]);
+    if (close) p.closePath();
+    return p;
+  };
+  const multi = (list, close) => { const p = new Path2D(); for (const f of list || []) p.addPath(poly(f, close)); return p; };
+  async function loadGeo() {
+    const g = await (await fetch(API + '/broadcast/geo')).json();
+    const all = new Path2D();
+    PL = g.places.map((pl) => {
+      const path = poly(pl.p, true);
+      all.addPath(path);
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = 0; i < pl.p.length; i += 2) {
+        x0 = Math.min(x0, pl.p[i]); x1 = Math.max(x1, pl.p[i]); y0 = Math.min(y0, pl.p[i + 1]); y1 = Math.max(y1, pl.p[i + 1]);
+      }
+      if (!isFinite(x0)) { x0 = x1 = pl.x; y0 = y1 = pl.y; }
+      // (English names split a town's parts the same way: "Tel Aviv - City Center")
+      const eb = (pl.e || '').split(' - ')[0].trim();
+      return { ...pl, eb, path, bb: [x0, y0, x1, y1] };
+    });
+    ALL = all;
+    LAND = multi(g.land, true); HOME = multi(g.home, true); COAST = multi(g.coast, false);
+    BORDERS = multi(g.borders, false); LAKES = multi(g.lakes, true);
+    G = g;
+  }
+  // the whole country, north of Metula to Eilat (the map's kilometres)
+  const ISRAEL = [-76, -208, 90, 226];
+  const nameOf = (pl) => (lang === 'en' && pl.e ? pl.e : pl.n);
+  const townOf = (pl) => (lang === 'en' && pl.eb ? pl.eb : pl.b);
+  const areaOf = (pl) => (lang === 'en' ? pl.ae || pl.a : pl.a) || L().other;
+
+  // ------------------------------------------------------------ the state, pushed by the program
+  let S = null, offset = 0, lastMsg = 0;
+  const now = () => Date.now() + offset;
+  function take(s) { S = s; offset = s.now - Date.now(); lastMsg = Date.now(); render(); }
+
+  function classify() {
+    if (!S || !S.zones) return { mode: 'off' };
+    const t = now();
+    const zs = S.zones;
+    const sirens = zs.filter((z) => z.k === 'Siren');
+    const urgent = sirens.filter((z) => t - z.a < Math.max(z.c || 0, 15) * 1000 + 60000);
+    const hold = zs.filter((z) => z.k === 'Stay' || z.k === 'Near');
+    const pre = zs.filter((z) => z.k === 'Pre');
+    const ended = zs.filter((z) => z.k === 'End');
+    if (urgent.length) return { mode: 'siren', zones: urgent };
+    if (sirens.length || hold.length) return { mode: 'hold', zones: sirens.concat(hold) };
+    if (pre.length) return { mode: 'pre', zones: pre };
+    if (ended.length && t - Math.max(...ended.map((z) => z.f)) < 60000) return { mode: 'end', zones: ended };
+    return { mode: 'off', zones: [] };
+  }
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const mmss = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return s >= 3600 ? `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}` : `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; };
+  const hhmm = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const placeOf = (z) => (z.i != null && PL[z.i]) || null;
+
+  function groups(zones) {
+    const by = new Map();
+    for (const z of zones) {
+      const pl = placeOf(z);
+      const area = pl ? areaOf(pl) : L().other;
+      const town = pl ? townOf(pl) : z.n;
+      if (!by.has(area)) by.set(area, { area, n: 0, towns: new Set() });
+      const g = by.get(area);
+      g.n++;
+      if (town) g.towns.add(town);
+    }
+    return [...by.values()].sort((a, b) => b.n - a.n);
+  }
+
+  function mostCommon(list) {
+    const c = new Map();
+    for (const x of list) c.set(x, (c.get(x) || 0) + 1);
+    return [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  }
+
+  let view = { mode: 'off' }, sig = '', cardUntil = 0, startAt = 0;
+
+  function render() {
+    const v = classify();
+    const body = document.body;
+    const stale = !DEMO && Date.now() - lastMsg > 15000;
+    if (v.mode === 'off' || stale) {
+      body.classList.remove('on', 'map', 'urgent');
+      view = v;
+      if (lang !== LANGS[0]) setLang(LANGS[0]);
+      return;
+    }
+    const t = now();
+    const newSig = v.mode + '|' + v.zones.map((z) => (z.i ?? z.n) + ':' + z.a).sort().join(',');
+    if (newSig !== sig) {
+      const fresh = v.mode !== view.mode || v.zones.some((z) => !view.zones || !view.zones.some((o) => o.i === z.i && o.a === z.a));
+      sig = newSig;
+      if (fresh) {
+        // a new wave: the card comes up (again) for two minutes past the newest place
+        cardUntil = Math.max(...v.zones.map((z) => z.f)) + (v.mode === 'end' ? 60000 : 120000);
+        if (v.mode === 'siren' && SOUND) tone();
+        mapTarget(v.zones, view.mode === 'off');
+      }
+    }
+    view = v;
+    startAt = Math.min(...v.zones.map((z) => (v.mode === 'pre' || v.mode === 'end' ? z.f : z.a)));
+    const bar = $('bar');
+    bar.className = v.mode;
+    const W = L();
+    const threat = mostCommon(v.zones.map((z) => z.t)) || 'General';
+    const n = v.zones.length;
+    const gs = groups(v.zones);
+    const msg = S.msg || {};
+    const threatName = W.threat[threat] || W.threat.General;
+    let title, sub;
+    if (v.mode === 'siren') {
+      title = threatName;
+      sub = `${W.places(n)} · ${W.areas(gs.length)} · ${W.action[threat] || W.action.other}`;
+    } else if (v.mode === 'hold') {
+      title = W.title.hold;
+      sub = `${threatName} · ${W.places(n)} · ${W.since(hhmm(startAt))} · ${W.until}`;
+    } else if (v.mode === 'pre') {
+      title = W.title.pre;
+      // (the source's own words are Hebrew: shown in Hebrew, a fixed line in English)
+      sub = lang === 'he' && msg.kind === 'Pre' && msg.body ? msg.body : W.preSub;
+    } else {
+      title = W.title.end;
+      sub = lang === 'he' && msg.kind === 'End' && msg.body ? msg.body : W.endSub;
+    }
+    $('pill').textContent = W.pill[v.mode];
+    $('title').textContent = title;
+    $('sub').textContent = sub;
+    $('clockcap').textContent = W.cap[v.mode];
+    chips(gs);
+    // the card
+    const accent = v.mode === 'siren' || v.mode === 'hold' ? (THREAT_COLOR[threat] || '#ff2e2e') : MODE_COLOR[v.mode];
+    $('card').style.setProperty('--accent', accent);
+    $('ctitle').textContent = W.card[v.mode];
+    $('count').textContent = W.places(n);
+    $('foot').textContent = W.foot;
+    $('list').innerHTML = gs.slice(0, 6).map((g) => `<div class="grp"><b>${esc(g.area)}</b> · ${[...g.towns].map(esc).join(' · ')}</div>`).join('');
+    body.classList.add('on');
+    body.classList.toggle('urgent', v.mode === 'siren');
+    body.classList.toggle('map', t < cardUntil);
+    const mark = DEMO ? W.preview : S.test ? W.test : '';
+    $('mark').textContent = mark;
+    body.classList.toggle('marked', !!mark);
+    kick();
+  }
+
+  let chipSig = '';
+  function chips(gs) {
+    const html = gs.map((g) => `<span class="chip"><b>${esc(g.area)}</b><i>${g.n}</i></span>`).join('');
+    if (html + lang === chipSig) return;
+    chipSig = html + lang;
+    const track = $('chips');
+    track.classList.remove('roll');
+    track.innerHTML = html;
+    const room = track.parentElement.clientWidth;
+    if (track.scrollWidth > room) {
+      // too many for the bar: they run past (toward the reading's end), twice over so the loop has no gap
+      track.innerHTML = html + '<span style="width:40px;display:inline-block"></span>' + html;
+      const half = track.scrollWidth / 2;
+      track.style.setProperty('--shift', `${lang === 'he' ? half : -half}px`);
+      track.style.setProperty('--dur', `${Math.max(12, half / 70)}s`);
+      track.classList.add('roll');
+    }
+  }
+
+  // Hebrew and English in turn: the words fade out, change, and fade back in; the map stays
+  if (LANGS.length > 1) {
+    let i = 0;
+    setInterval(() => {
+      if (!document.body.classList.contains('on')) { i = 0; return; }
+      document.body.classList.add('swap');
+      setTimeout(() => {
+        i = (i + 1) % LANGS.length;
+        setLang(LANGS[i]);
+        render();
+        alertKey = '';
+        kick();
+        document.body.classList.remove('swap');
+      }, 230);
+    }, EVERY);
+  }
+
+  // ------------------------------------------------------------ the map
+  const cv = $('map'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  let cam = null, camFrom = null, camTo = null, camT0 = 0;
+  const baseCv = document.createElement('canvas'), alertCv = document.createElement('canvas'), pulseCv = document.createElement('canvas');
+  for (const c of [baseCv, alertCv, pulseCv]) { c.width = W; c.height = H; }
+  let baseKey = '', alertKey = '';
+
+  function fit(b, padFrac) {
+    const bw = Math.max(b[2] - b[0], 1), bh = Math.max(b[3] - b[1], 1);
+    const s = Math.min((W * (1 - 2 * padFrac)) / bw, (H * (1 - 2 * padFrac)) / bh, 30);
+    return { cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2, s };
+  }
+  const whole = () => fit(ISRAEL, 0.03);
+
+  function mapTarget(zones, fromWhole) {
+    let b = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const z of zones) {
+      const pl = placeOf(z);
+      if (!pl) continue;
+      b = [Math.min(b[0], pl.bb[0]), Math.min(b[1], pl.bb[1]), Math.max(b[2], pl.bb[2]), Math.max(b[3], pl.bb[3])];
+    }
+    let target = whole();
+    if (isFinite(b[0])) {
+      const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+      const hw = Math.max((b[2] - b[0]) / 2, 13), hh = Math.max((b[3] - b[1]) / 2, 13);
+      const c = fit([cx - hw, cy - hh, cx + hw, cy + hh], 0.12);
+      if (c.s > target.s) target = c;
+    }
+    camFrom = fromWhole || !cam ? whole() : { ...cam };
+    camTo = target;
+    camT0 = performance.now();
+    if (!cam) cam = { ...camFrom };
+  }
+
+  function stepCam(ts) {
+    if (!camTo) return false;
+    const k = Math.min(1, (ts - camT0) / 1100);
+    const e = k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+    const ls = Math.log(camFrom.s) + (Math.log(camTo.s) - Math.log(camFrom.s)) * e;
+    cam = { cx: camFrom.cx + (camTo.cx - camFrom.cx) * e, cy: camFrom.cy + (camTo.cy - camFrom.cy) * e, s: Math.exp(ls) };
+    if (k >= 1) { camTo = null; return false; }
+    return true;
+  }
+
+  const setCam = (c, g) => g.setTransform(c.s, 0, 0, c.s, W / 2 - c.cx * c.s, H / 2 - c.cy * c.s);
+
+  function drawBase() {
+    const g = baseCv.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const sea = g.createLinearGradient(0, 0, 0, H);
+    sea.addColorStop(0, '#0c2036'); sea.addColorStop(1, '#081626');
+    g.fillStyle = sea; g.fillRect(0, 0, W, H);
+    setCam(cam, g);
+    const s = cam.s;
+    g.fillStyle = '#12171d'; g.fill(LAND);
+    g.fillStyle = '#1e2832'; g.fill(HOME);
+    g.fillStyle = '#2b3946'; g.fill(ALL);
+    g.lineWidth = 0.7 / s; g.strokeStyle = `rgba(110,130,150,${Math.min(.6, Math.max(.12, (s - .8) / 7))})`; g.stroke(ALL);
+    g.fillStyle = '#0e2233'; g.fill(LAKES);
+    g.lineWidth = 1.1 / s; g.strokeStyle = '#46627c'; g.stroke(COAST);
+    g.setLineDash([4 / s, 3 / s]); g.lineWidth = 1 / s; g.strokeStyle = 'rgba(111,127,142,.7)'; g.stroke(BORDERS); g.setLineDash([]);
+  }
+
+  function zoneColor(z) {
+    if (z.k === 'Siren' || z.k === 'Stay') return THREAT_COLOR[z.t] || '#ff2e2e';
+    if (z.k === 'Near') return '#ff8f40';
+    if (z.k === 'Pre') return '#ffb020';
+    if (z.k === 'End') return '#2ed47a';
+    return '#5b9bd5';
+  }
+
+  function drawAlerts() {
+    const a = alertCv.getContext('2d'), p = pulseCv.getContext('2d');
+    for (const g of [a, p]) { g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, H); }
+    const s = cam.s, t = now();
+    const byColor = new Map();
+    for (const z of view.zones || []) {
+      const pl = placeOf(z);
+      if (!pl) continue;
+      const urgent = z.k === 'Siren' && t - z.a < Math.max(z.c || 0, 15) * 1000 + 60000;
+      const key = zoneColor(z) + (urgent ? '!' : '');
+      if (!byColor.has(key)) byColor.set(key, { color: zoneColor(z), urgent, path: new Path2D() });
+      byColor.get(key).path.addPath(pl.path);
+    }
+    setCam(cam, a); setCam(cam, p);
+    for (const { color, urgent, path } of byColor.values()) {
+      if (urgent) {
+        p.shadowColor = color; p.shadowBlur = 18; p.fillStyle = color; p.fill(path);
+        a.lineWidth = 1.6 / s; a.strokeStyle = 'rgba(255,255,255,.75)'; a.stroke(path);
+      } else {
+        a.globalAlpha = .55; a.fillStyle = color; a.fill(path); a.globalAlpha = 1;
+        a.lineWidth = 1.2 / s; a.strokeStyle = color; a.stroke(path);
+      }
+    }
+    // names: one per town, the biggest groups first, none on top of another
+    a.setTransform(1, 0, 0, 1, 0, 0);
+    a.direction = lang === 'he' ? 'rtl' : 'ltr'; a.textAlign = 'center'; a.textBaseline = 'middle';
+    a.font = '700 14px Rubik, "Segoe UI", sans-serif';
+    const towns = new Map();
+    for (const z of view.zones || []) {
+      const pl = placeOf(z);
+      if (!pl) continue;
+      const vx = (pl.x - cam.cx) * s + W / 2, vy = (pl.y - cam.cy) * s + H / 2;
+      if (vx < 0 || vy < 0 || vx > W || vy > H) continue;
+      const name = townOf(pl);
+      if (!towns.has(name)) towns.set(name, { x: 0, y: 0, n: 0 });
+      const e = towns.get(name); e.x += vx; e.y += vy; e.n++;
+    }
+    const taken = [];
+    const list = [...towns.entries()].sort((x, y) => y[1].n - x[1].n).slice(0, 40);
+    for (const [name, e] of list) {
+      const x = e.x / e.n, y = e.y / e.n, w = a.measureText(name).width + 6, h = 17;
+      const r = [x - w / 2, y - h / 2, x + w / 2, y + h / 2];
+      if (r[0] < 4 || r[2] > W - 4 || r[1] < 4 || r[3] > H - 4) continue;
+      if (taken.some((q) => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
+      taken.push(r);
+      a.lineWidth = 4; a.strokeStyle = 'rgba(4,7,10,.9)'; a.lineJoin = 'round'; a.strokeText(name, x, y);
+      a.fillStyle = '#fff'; a.fillText(name, x, y);
+      if (taken.length >= 14) break;
+    }
+    // the whole country, small, when the camera is close: where this is
+    const w = whole();
+    // (only while the view is a small part of the country; a wide view would draw its frame past the little map)
+    if (s > w.s * 1.6 && W / s < (ISRAEL[2] - ISRAEL[0]) * 0.8) {
+      const iw = 62, ih = 158, ix = 10, iy = H - ih - 10;
+      a.fillStyle = 'rgba(6,10,15,.88)'; roundRect(a, ix, iy, iw, ih, 7); a.fill();
+      const c2 = { cx: (ISRAEL[0] + ISRAEL[2]) / 2, cy: (ISRAEL[1] + ISRAEL[3]) / 2, s: Math.min((iw - 8) / (ISRAEL[2] - ISRAEL[0]), (ih - 8) / (ISRAEL[3] - ISRAEL[1])) };
+      a.save(); a.beginPath(); a.rect(ix, iy, iw, ih); a.clip();
+      a.setTransform(c2.s, 0, 0, c2.s, ix + iw / 2 - c2.cx * c2.s, iy + ih / 2 - c2.cy * c2.s);
+      a.fillStyle = '#3a4a59'; a.fill(HOME);
+      for (const { color, path } of byColor.values()) { a.fillStyle = color; a.fill(path); }
+      a.setTransform(1, 0, 0, 1, 0, 0);
+      const x0 = ix + iw / 2 + ((cam.cx - W / 2 / s) - c2.cx) * c2.s, y0 = iy + ih / 2 + ((cam.cy - H / 2 / s) - c2.cy) * c2.s;
+      a.strokeStyle = 'rgba(255,255,255,.9)'; a.lineWidth = 1.2; a.strokeRect(x0, y0, (W / s) * c2.s, (H / s) * c2.s);
+      a.restore();
+    }
+  }
+
+  function roundRect(g, x, y, w, h, r) {
+    g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+    g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+  }
+
+  let raf = 0;
+  function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+  function frame(ts) {
+    raf = 0;
+    if (!G || !cam || !document.body.classList.contains('on')) return;
+    const moving = stepCam(ts);
+    const key = `${cam.cx.toFixed(2)}|${cam.cy.toFixed(2)}|${cam.s.toFixed(4)}`;
+    if (key !== baseKey) { drawBase(); baseKey = key; }
+    const aKey = key + '|' + sig + '|' + lang + '|' + (view.zones || []).filter((z) => z.k === 'Siren' && now() - z.a < Math.max(z.c || 0, 15) * 1000 + 60000).length;
+    if (aKey !== alertKey) { drawAlerts(); alertKey = aKey; }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(baseCv, 0, 0);
+    const urgent = view.mode === 'siren';
+    if (urgent) {
+      ctx.globalAlpha = .45 + .5 * (.5 + .5 * Math.sin(ts / 1250 * Math.PI * 2));
+      ctx.drawImage(pulseCv, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+    ctx.drawImage(alertCv, 0, 0);
+    // rings spreading from the places under alert
+    if (urgent) {
+      const ph = (ts / 2100) % 1;
+      const pts = (view.zones || []).map(placeOf).filter(Boolean).slice(0, 6);
+      for (const pl of pts) {
+        const x = (pl.x - cam.cx) * cam.s + W / 2, y = (pl.y - cam.cy) * cam.s + H / 2;
+        for (const k of [0, .5]) {
+          const f = (ph + k) % 1;
+          ctx.beginPath(); ctx.arc(x, y, 6 + f * 40, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255,90,90,${(1 - f) * .6})`; ctx.lineWidth = 1.6; ctx.stroke();
+        }
+      }
+    }
+    if (moving || urgent) kick();
+  }
+
+  // the clock and the card's timing, a few times a second
+  setInterval(() => {
+    if (!document.body.classList.contains('on')) { if (S) render(); return; }
+    const t = now();
+    $('elapsed').textContent = view.mode === 'end' ? hhmm(Math.max(...(view.zones || [{ f: t }]).map((z) => z.f))) : mmss(t - startAt);
+    if (S) render();
+  }, 250);
+
+  // ------------------------------------------------------------ sound, only with ?sound=1
+  let audio = null;
+  function tone() {
+    try {
+      audio = audio || new AudioContext();
+      const t0 = audio.currentTime;
+      for (const [i, f] of [[0, 880], [1, 660], [2, 880]]) {
+        const o = audio.createOscillator(), g = audio.createGain();
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0, t0 + i * .22); g.gain.linearRampToValueAtTime(.35, t0 + i * .22 + .02); g.gain.exponentialRampToValueAtTime(.001, t0 + i * .22 + .2);
+        o.connect(g).connect(audio.destination); o.start(t0 + i * .22); o.stop(t0 + i * .22 + .22);
+      }
+    } catch (e) { /* no sound device in the source: the picture still goes */ }
+  }
+
+  // ------------------------------------------------------------ previews with made-up places, never for OBS
+  function demo(kind) {
+    const t = Date.now();
+    const near = (name, km) => {
+      const c = PL.find((p) => p.n === name) || PL[0];
+      return PL.map((p, i) => [i, Math.hypot(p.x - c.x, p.y - c.y)]).filter(([, d]) => d <= km).map(([i]) => i);
+    };
+    const zone = (i, k, th, ago) => ({ i, k, t: th, a: t - ago, f: t - ago, c: PL[i].c });
+    let zones = [], msg = null;
+    if (kind === 'big') zones = near('רמלה', 95).map((i) => zone(i, 'Siren', 'Missiles', 9000));
+    else if (kind === 'pre') { zones = near('ירושלים - מרכז', 45).map((i) => zone(i, 'Pre', 'General', 30000)); msg = { kind: 'Pre', body: 'בעקבות זיהוי שיגורים, בדקות הקרובות צפויות להתקבל התרעות באזורים ירושלים, יהודה, שפלת יהודה' }; }
+    else if (kind === 'hold') zones = near('חיפה - מערב', 14).map((i) => zone(i, 'Siren', 'Missiles', 240000));
+    else if (kind === 'end') { zones = near('נחל עוז', 9).map((i) => zone(i, 'End', 'General', 5000)); msg = { kind: 'End', body: 'האירוע הסתיים, ניתן לצאת מהמרחב המוגן' }; }
+    else if (kind === 'aircraft') zones = near('מטולה', 12).map((i) => zone(i, 'Siren', 'Aircraft', 7000));
+    else zones = near('תל אביב - מרכז העיר', 9).map((i) => zone(i, 'Siren', 'Missiles', 11000));
+    take({ rev: 1, now: t, test: false, ok: true, zones, msg });
+  }
+
+  (async () => {
+    try { await document.fonts.load('900 56px Rubik'); } catch (e) { /* the fallback font draws */ }
+    // (SirenDesk may be starting, or stopped: keep trying, show nothing meanwhile)
+    while (!G) {
+      try { await loadGeo(); } catch (e) { G = null; await new Promise((r) => setTimeout(r, 3000)); }
+    }
+    if (DEMO) { demo(DEMO); setInterval(() => { lastMsg = Date.now(); }, 1000); return; }
+    const es = new EventSource(API + '/broadcast/events');
+    es.onmessage = (e) => { try { take(JSON.parse(e.data)); } catch (err) { /* a broken message is dropped */ } };
+  })();
+})();
+</script>
+</body>
+</html>

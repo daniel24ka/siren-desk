@@ -1,0 +1,10 @@
+/target
+/data
+/SirenDesk.exe
+/SirenDesk-*.exe
+/obs
+*.log
+__pycache__/
+*.pyc
+# Tzofar's place lists: theirs, fetched by tools/fetch_lists.py
+/assets/lists/*.json
